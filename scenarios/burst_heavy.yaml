@@ -1,0 +1,32 @@
+scenario:
+  name: burst_heavy
+  duration_seconds: 100
+  scans_per_strategy: 500
+  dwell_time_ms: 200
+  seed: 45
+  start_time: "2026-01-01T10:00:00"
+
+emitters:
+  - id: 3
+    name: Emitter Charlie
+    type: burst
+    band_id: 7
+    burst_probability: 0.35
+    duration_seconds: 0.55
+    power_dbm: -22
+  - id: 5
+    name: Emitter Echo
+    type: periodic
+    band_id: 8
+    period_seconds: 7
+    duration_seconds: 0.9
+    phase_seconds: 2
+    power_dbm: -24
+
+noise:
+  noise_floor_dbm: -82
+  noise_std_db: 4
+  detection_threshold_db: 10
+  threshold_jitter_db: 2
+  path_loss_min_db: 5
+  path_loss_max_db: 55

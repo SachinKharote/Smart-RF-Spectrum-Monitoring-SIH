@@ -1,0 +1,24 @@
+scenario:
+  name: frequency_hopping
+  duration_seconds: 100
+  scans_per_strategy: 500
+  dwell_time_ms: 200
+  seed: 44
+  start_time: "2026-01-01T10:00:00"
+
+emitters:
+  - id: 4
+    name: Emitter Delta
+    type: hopping
+    hop_pattern: [2, 4, 8, 6]
+    hop_interval_seconds: 1
+    duration_seconds: 0.7
+    power_dbm: -19
+
+noise:
+  noise_floor_dbm: -82
+  noise_std_db: 4
+  detection_threshold_db: 10
+  threshold_jitter_db: 2
+  path_loss_min_db: 5
+  path_loss_max_db: 55

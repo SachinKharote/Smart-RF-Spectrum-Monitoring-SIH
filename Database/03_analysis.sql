@@ -212,12 +212,7 @@ SELECT
     s.strategy,
 
     ROUND(
-        AVG(
-            EXTRACT(
-                EPOCH FROM
-                (i.intercept_time - t.start_time)
-            )::numeric
-        ),
+        AVG(i.time_error_ms)::numeric / 1000,
         3
     ) AS average_intercept_time_seconds
 
@@ -228,12 +223,6 @@ JOIN observations o
 
 JOIN scans s
     ON o.scan_id = s.scan_id
-
-JOIN transmissions t
-    ON t.emitter_id = i.emitter_id
-   AND t.band_id = o.band_id
-   AND i.intercept_time >= t.start_time
-   AND i.intercept_time <= t.end_time
 
 GROUP BY s.strategy
 
@@ -370,12 +359,7 @@ interception AS (
         s.strategy,
 
         ROUND(
-            AVG(
-                EXTRACT(
-                    EPOCH FROM
-                    (i.intercept_time - t.start_time)
-                )::numeric
-            ),
+            AVG(i.time_error_ms)::numeric / 1000,
             3
         ) AS average_intercept_time
 
@@ -386,12 +370,6 @@ interception AS (
 
     JOIN scans s
         ON o.scan_id = s.scan_id
-
-    JOIN transmissions t
-        ON t.emitter_id = i.emitter_id
-       AND t.band_id = o.band_id
-       AND i.intercept_time >= t.start_time
-       AND i.intercept_time <= t.end_time
 
     GROUP BY s.strategy
 )

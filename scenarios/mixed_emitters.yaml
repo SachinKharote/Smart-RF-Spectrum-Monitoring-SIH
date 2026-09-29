@@ -1,0 +1,57 @@
+scenario:
+  name: mixed_emitters
+  duration_seconds: 100
+  scans_per_strategy: 500
+  dwell_time_ms: 200
+  seed: 42
+  start_time: "2026-01-01T10:00:00"
+  strategies: [Sequential, Random, Adaptive]
+
+emitters:
+  - id: 1
+    name: Emitter Alpha
+    type: fixed
+    band_id: 3
+    period_seconds: 4
+    duration_seconds: 0.8
+    phase_seconds: 0
+    power_dbm: -18
+  - id: 2
+    name: Emitter Bravo
+    type: periodic
+    band_id: 5
+    period_seconds: 5
+    duration_seconds: 1.0
+    phase_seconds: 1
+    power_dbm: -20
+  - id: 3
+    name: Emitter Charlie
+    type: burst
+    band_id: 7
+    burst_probability: 0.2
+    duration_seconds: 0.55
+    power_dbm: -22
+  - id: 4
+    name: Emitter Delta
+    type: hopping
+    hop_pattern: [2, 4, 8, 6]
+    hop_interval_seconds: 1
+    duration_seconds: 0.7
+    power_dbm: -19
+  - id: 5
+    name: Emitter Echo
+    type: periodic
+    band_id: 8
+    period_seconds: 7
+    duration_seconds: 0.9
+    phase_seconds: 2
+    power_dbm: -24
+
+noise:
+  noise_floor_dbm: -82
+  noise_std_db: 4
+  detection_threshold_db: 10
+  threshold_jitter_db: 2
+  fading_std_db: 4
+  path_loss_min_db: 5
+  path_loss_max_db: 55

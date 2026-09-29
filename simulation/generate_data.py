@@ -1,617 +1,227 @@
+"""Generate scenario-driven synthetic RF data in the existing PostgreSQL schema."""
+
+import argparse
 import os
-import psycopg2
 import random
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import psycopg2
 from dotenv import load_dotenv
 
-# ============================================================
-# SMART RF SPECTRUM MONITORING
-# SIMULATION ENGINE
-# ============================================================
-
-load_dotenv()
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": int(os.getenv("DB_PORT")),
-    "database": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD")
-}
-
-# Reproducible simulation
-random.seed(42)
-
-NUM_TIME_SLOTS = 100
-SCANS_PER_STRATEGY = 500
-
-# Each time slot represents 1 second
-SLOT_DURATION_SECONDS = 1
-
-# Scanner dwell time
-DWELL_TIME_MS = 200
-
-STRATEGIES = [
-    "Sequential",
-    "Random",
-    "Adaptive"
-]
-
-START_TIME = datetime(2026, 1, 1, 10, 0, 0)
-
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-connection = psycopg2.connect(**DB_CONFIG)
-cursor = connection.cursor()
-
-print("Connected to PostgreSQL.")
-
-
-# ============================================================
-# LOAD BANDS
-# ============================================================
-
-cursor.execute("""
-    SELECT
-        band_id,
-        priority
-    FROM frequency_bands
-    ORDER BY band_id;
-""")
-
-bands = cursor.fetchall()
-
-print(f"Loaded {len(bands)} frequency bands.")
-
-
-# ============================================================
-# LOAD EMITTERS
-# ============================================================
-
-cursor.execute("""
-    SELECT
-        emitter_id,
-        priority
-    FROM emitters
-    ORDER BY emitter_id;
-""")
-
-emitters = cursor.fetchall()
-
-print(f"Loaded {len(emitters)} emitters.")
-
-
-# ============================================================
-# CLEAR PREVIOUS SIMULATION
-# ============================================================
-
-print("Clearing previous simulation data...")
-
-cursor.execute("DELETE FROM intercepts;")
-cursor.execute("DELETE FROM observations;")
-cursor.execute("DELETE FROM scans;")
-cursor.execute("DELETE FROM transmissions;")
-
-connection.commit()
-
-
-# ============================================================
-# GENERATE GROUND-TRUTH TRANSMISSIONS
-# ============================================================
-
-print("Generating simulated transmissions...")
-
-transmissions = []
-
-transmission_id = 1
-
-
-# Give some bands higher signal activity.
-# This creates meaningful patterns for the adaptive scheduler.
-
-signal_band_weights = {
-    1: 1,
-    2: 1,
-    3: 4,
-    4: 1,
-    5: 1,
-    6: 3,
-    7: 1,
-    8: 5,
-    9: 1,
-    10: 2
-}
-
-weighted_band_list = []
-
-for band_id, weight in signal_band_weights.items():
-    weighted_band_list.extend([band_id] * weight)
-
-
-for slot in range(NUM_TIME_SLOTS):
-
-    slot_start = START_TIME + timedelta(
-        seconds=slot
-    )
-
-    # 1-3 transmissions per slot
-    number_of_transmissions = random.randint(1, 3)
-
-    for _ in range(number_of_transmissions):
-
-        emitter_id, _ = random.choice(emitters)
-
-        band_id = random.choice(
-            weighted_band_list
-        )
-
-        # Transmission begins at a random point
-        # within the time slot.
-        start_offset = random.uniform(
-            0.0,
-            0.5
-        )
-
-        transmission_start = (
-            slot_start
-            + timedelta(seconds=start_offset)
-        )
-
-        # Longer duration makes scanner timing meaningful.
-        duration = random.uniform(
-            0.5,
-            1.5
-        )
-
-        transmission_end = (
-            transmission_start
-            + timedelta(seconds=duration)
-        )
-
-        signal_strength = round(
-            random.uniform(-75, -35),
-            2
-        )
-
-        cursor.execute("""
-            INSERT INTO transmissions (
-                transmission_id,
-                emitter_id,
-                band_id,
-                start_time,
-                end_time,
-                signal_strength_dbm
-            )
-            VALUES (%s, %s, %s, %s, %s, %s);
-        """, (
-            transmission_id,
-            emitter_id,
-            band_id,
-            transmission_start,
-            transmission_end,
-            signal_strength
-        ))
-
-        transmissions.append({
-            "transmission_id": transmission_id,
-            "emitter_id": emitter_id,
-            "band_id": band_id,
-            "start_time": transmission_start,
-            "end_time": transmission_end,
-            "signal_strength": signal_strength
-        })
-
-        transmission_id += 1
-
-
-print(
-    f"Generated {len(transmissions)} transmissions."
-)
-
-
-# ============================================================
-# SCANNING
-# ============================================================
-
-scan_id = 1
-observation_id = 1
-intercept_id = 1
-
-
-# Adaptive memory
-recent_hits = {
-    band_id: 0
-    for band_id, _ in bands
-}
-
-recent_misses = {
-    band_id: 0
-    for band_id, _ in bands
-}
-
-
-# Last time a signal was detected in each band
-last_detection = {
-    band_id: None
-    for band_id, _ in bands
-}
-
-
-# ============================================================
-# HELPER FUNCTION
-# ============================================================
-
-def find_active_transmission(
-    band_id,
-    scan_time
-):
-    """
-    Find a transmission that is active in the
-    selected band at the scan time.
-    """
-
-    active = []
-
-    for transmission in transmissions:
-
-        if transmission["band_id"] != band_id:
-            continue
-
-        if (
-            transmission["start_time"]
-            <= scan_time
-            <= transmission["end_time"]
-        ):
-            active.append(transmission)
-
-    if not active:
-        return None
-
-    # If multiple transmissions overlap,
-    # use the strongest one.
-    return max(
-        active,
-        key=lambda x: x["signal_strength"]
-    )
-
-
-# ============================================================
-# RUN EACH STRATEGY
-# ============================================================
-
-for strategy in STRATEGIES:
-
-    print(
-        f"Running {strategy} strategy..."
-    )
-
-    sequential_index = 0
-
-    for scan_number in range(
-        SCANS_PER_STRATEGY
-    ):
-
-        # Each strategy gets its own timeline.
-        #
-        # 500 scans × 200 ms = 100 seconds.
-
-        scan_time = (
-            START_TIME
-            + timedelta(
-                milliseconds=
-                scan_number * DWELL_TIME_MS
-            )
-        )
-
-
-        # ====================================================
-        # SELECT BAND
-        # ====================================================
-
-        if strategy == "Sequential":
-
-            band_id = bands[
-                sequential_index
-                % len(bands)
-            ][0]
-
-            sequential_index += 1
-
-
-        elif strategy == "Random":
-
-            band_id = random.choice(
-                bands
-            )[0]
-
-
-        else:
-
-            # =================================================
-            # ADAPTIVE SCORING
-            # =================================================
-
-            scored_bands = []
-
-            for band_id_candidate, original_priority in bands:
-
-                score = (
-                    original_priority
-                    + (3.0 * recent_hits[band_id_candidate])
-                    - (0.5 * recent_misses[band_id_candidate])
+from emitter import generate_transmissions
+from noise import observe
+from scenario import ScenarioError, load_scenario
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SCENARIO = PROJECT_ROOT / "scenarios" / "mixed_emitters.yaml"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO, help="YAML scenario file")
+    return parser.parse_args()
+
+
+def database_config():
+    load_dotenv(PROJECT_ROOT / ".env")
+    keys = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+    missing = [key for key in keys if not os.getenv(key)]
+    if missing:
+        raise RuntimeError(f"Missing database settings in .env/environment: {', '.join(missing)}")
+    return {
+        "host": os.getenv("DB_HOST"),
+        "port": int(os.getenv("DB_PORT")),
+        "dbname": os.getenv("DB_NAME"),
+        "user": os.getenv("DB_USER"),
+        "password": os.getenv("DB_PASSWORD"),
+    }
+
+
+def active_transmission(transmissions, band_id, scan_time):
+    candidates = [
+        tx for tx in transmissions
+        if tx["band_id"] == band_id and tx["start_time"] <= scan_time < tx["end_time"]
+    ]
+    return max(candidates, key=lambda tx: tx["signal_strength_dbm"], default=None)
+
+
+def emitter_behavior(database_type):
+    """Map the existing seed-table labels to engine behavior classes."""
+    normalized = " ".join(str(database_type).lower().replace("_", " ").split())
+    aliases = {
+        "fixed": "fixed",
+        "periodic": "periodic",
+        "intermittent": "burst",
+        "burst": "burst",
+        "frequency agile": "hopping",
+        "hopping": "hopping",
+    }
+    if normalized not in aliases:
+        raise RuntimeError(f"Unsupported database emitter_type: {database_type!r}")
+    return aliases[normalized]
+
+
+def choose_band(strategy, bands, scan_time, memory, rng):
+    if strategy == "Sequential":
+        return bands[memory["sequential_index"] % len(bands)][0]
+    if strategy == "Random":
+        return rng.choice(bands)[0]
+
+    scored = []
+    for band_id, priority in bands:
+        score = priority + 3.0 * memory["hits"][band_id] - 0.5 * memory["misses"][band_id]
+        last = memory["last_detection"][band_id]
+        if last is not None:
+            elapsed = (scan_time - last).total_seconds()
+            score += 5 if elapsed < 5 else (2 if elapsed < 10 else 0)
+        scored.append((band_id, score))
+    scored.sort(key=lambda pair: (-pair[1], pair[0]))
+    return scored[0][0] if rng.random() < 0.8 else rng.choice(bands)[0]
+
+
+def main():
+    args = parse_args()
+    try:
+        scenario = load_scenario(args.scenario)
+        config = database_config()
+    except (ScenarioError, RuntimeError, ValueError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    settings = scenario["scenario"]
+    start_time = datetime.fromisoformat(str(settings["start_time"]))
+    duration = float(settings["duration_seconds"])
+    scans_per_strategy = int(settings["scans_per_strategy"])
+    dwell_ms = int(settings["dwell_time_ms"])
+    strategies = settings.get("strategies", ["Sequential", "Random", "Adaptive"])
+    if not strategies or any(s not in {"Sequential", "Random", "Adaptive"} for s in strategies):
+        print("Configuration error: strategies must use Sequential, Random, or Adaptive.", file=sys.stderr)
+        return 2
+
+    rng = random.Random(int(settings["seed"]))
+    try:
+        connection = psycopg2.connect(**config)
+    except psycopg2.Error as exc:
+        print(f"Database connection failed: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT band_id, priority FROM frequency_bands ORDER BY band_id;")
+            bands = cursor.fetchall()
+            cursor.execute("SELECT emitter_id, emitter_name, emitter_type FROM emitters ORDER BY emitter_id;")
+            database_emitters = {row[0]: row[1:] for row in cursor.fetchall()}
+
+            if not bands:
+                raise RuntimeError("No frequency bands found. Run Database/01_schema.sql and 02_seed_data.sql first.")
+            band_ids = {row[0] for row in bands}
+            scenario_emitters = {int(spec["id"]): spec for spec in scenario["emitters"]}
+            missing_emitters = set(scenario_emitters) - set(database_emitters)
+            if missing_emitters:
+                raise RuntimeError(
+                    "Scenario references emitter IDs absent from the database: "
+                    f"{sorted(missing_emitters)}"
                 )
-
-                # Give a bonus to bands where a detection
-                # happened recently.
-                if last_detection[
-                    band_id_candidate
-                ] is not None:
-
-                    elapsed = (
-                        scan_time
-                        - last_detection[
-                            band_id_candidate
-                        ]
-                    ).total_seconds()
-
-                    if elapsed < 5:
-                        score += 5
-
-                    elif elapsed < 10:
-                        score += 2
-
-                scored_bands.append(
-                    (
-                        band_id_candidate,
-                        score
+            for spec in scenario["emitters"]:
+                configured_type = str(spec["type"]).lower()
+                seeded_type = emitter_behavior(database_emitters[int(spec["id"])][1])
+                if configured_type != seeded_type:
+                    raise RuntimeError(
+                        f"Emitter {spec['id']} is seeded as {seeded_type!r} but the scenario configures "
+                        f"{configured_type!r}. Keep the scenario type aligned with emitters.emitter_type."
                     )
+                emitter_type = str(spec["type"]).lower()
+                if emitter_type in {"fixed", "periodic", "burst"}:
+                    used_bands = [int(spec["band_id"])]
+                else:
+                    used_bands = [int(value) for value in spec["hop_pattern"]]
+                if not set(used_bands).issubset(band_ids):
+                    raise RuntimeError(f"Emitter {spec['id']} references a band absent from frequency_bands.")
+            if int(settings["dwell_time_ms"]) * scans_per_strategy > duration * 1000:
+                raise RuntimeError("scans_per_strategy × dwell_time_ms exceeds scenario duration.")
+
+            transmissions = generate_transmissions(scenario["emitters"], duration, start_time, rng)
+            print(f"Connected. Scenario: {settings.get('name', args.scenario.stem)}")
+            print(f"Generated {len(transmissions)} ground-truth transmissions.")
+            cursor.execute("DELETE FROM intercepts;")
+            cursor.execute("DELETE FROM observations;")
+            cursor.execute("DELETE FROM scans;")
+            cursor.execute("DELETE FROM transmissions;")
+
+            for tx in transmissions:
+                cursor.execute(
+                    """INSERT INTO transmissions
+                       (transmission_id, emitter_id, band_id, start_time, end_time, signal_strength_dbm)
+                       VALUES (%s, %s, %s, %s, %s, %s);""",
+                    (tx["transmission_id"], tx["emitter_id"], tx["band_id"], tx["start_time"],
+                     tx["end_time"], tx["signal_strength_dbm"]),
                 )
 
+            scan_id = observation_id = intercept_id = 1
+            for strategy in strategies:
+                print(f"Running {strategy} strategy...")
+                memory = {
+                    "sequential_index": 0,
+                    "hits": {band_id: 0 for band_id, _ in bands},
+                    "misses": {band_id: 0 for band_id, _ in bands},
+                    "last_detection": {band_id: None for band_id, _ in bands},
+                }
+                for scan_number in range(scans_per_strategy):
+                    scan_time = start_time + timedelta(milliseconds=scan_number * dwell_ms)
+                    band_id = choose_band(strategy, bands, scan_time, memory, rng)
+                    if strategy == "Sequential":
+                        memory["sequential_index"] += 1
+                    tx = active_transmission(transmissions, band_id, scan_time)
+                    received_signal, snr_db = observe(tx, scenario.get("noise", {}), rng)
+                    actual_signal = tx is not None
 
-            scored_bands.sort(
-                key=lambda x: x[1],
-                reverse=True
-            )
+                    cursor.execute(
+                        "INSERT INTO scans (scan_id, band_id, strategy, scan_time, dwell_time_ms) VALUES (%s, %s, %s, %s, %s);",
+                        (scan_id, band_id, strategy, scan_time, dwell_ms),
+                    )
+                    cursor.execute(
+                        "INSERT INTO observations (observation_id, scan_id, band_id, received_signal, actual_signal, snr_db) VALUES (%s, %s, %s, %s, %s, %s);",
+                        (observation_id, scan_id, band_id, received_signal, actual_signal, snr_db),
+                    )
 
+                    if strategy == "Adaptive":
+                        if actual_signal and received_signal:
+                            memory["hits"][band_id] += 1
+                            memory["last_detection"][band_id] = scan_time
+                        elif actual_signal:
+                            memory["misses"][band_id] += 1
 
-            # 80% exploitation
-            # 20% exploration
+                    if actual_signal and received_signal:
+                        intercept_time = scan_time + timedelta(seconds=rng.uniform(0.02, 0.08))
+                        if intercept_time < tx["end_time"]:
+                            elapsed_ms = (intercept_time - tx["start_time"]).total_seconds() * 1000
+                            cursor.execute(
+                                "INSERT INTO intercepts (intercept_id, observation_id, emitter_id, intercept_time, time_error_ms) VALUES (%s, %s, %s, %s, %s);",
+                                (intercept_id, observation_id, tx["emitter_id"], intercept_time, round(elapsed_ms, 2)),
+                            )
+                            intercept_id += 1
+                    scan_id += 1
+                    observation_id += 1
 
-            if random.random() < 0.80:
-
-                band_id = scored_bands[0][0]
-
-            else:
-
-                band_id = random.choice(
-                    bands
-                )[0]
-
-
-        # ====================================================
-        # RECORD SCAN
-        # ====================================================
-
-        cursor.execute("""
-            INSERT INTO scans (
-                scan_id,
-                band_id,
-                strategy,
-                scan_time,
-                dwell_time_ms
-            )
-            VALUES (%s, %s, %s, %s, %s);
-        """, (
-            scan_id,
-            band_id,
-            strategy,
-            scan_time,
-            DWELL_TIME_MS
-        ))
-
-
-        # ====================================================
-        # GROUND TRUTH
-        # ====================================================
-
-        active_transmission = (
-            find_active_transmission(
-                band_id,
-                scan_time
-            )
-        )
-
-        actual_signal = (
-            active_transmission is not None
-        )
-
-
-        # ====================================================
-        # RECEIVER MODEL
-        # ====================================================
-
-        if actual_signal:
-
-            detection_probability = {
-                "Sequential": 0.72,
-                "Random": 0.60,
-                "Adaptive": 0.88
-            }[strategy]
-
-            received_signal = (
-                random.random()
-                < detection_probability
-            )
-
-            snr_db = round(
-                random.uniform(5, 25),
-                2
-            )
-
-        else:
-
-            false_alarm_probability = {
-                "Sequential": 0.08,
-                "Random": 0.10,
-                "Adaptive": 0.05
-            }[strategy]
-
-            received_signal = (
-                random.random()
-                < false_alarm_probability
-            )
-
-            snr_db = round(
-                random.uniform(-10, 5),
-                2
-            )
+        connection.commit()
+        print("Simulation complete:")
+        print(f"  Transmissions: {len(transmissions)}")
+        print(f"  Scans/observations: {scan_id - 1}")
+        print(f"  Intercepts: {intercept_id - 1}")
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    return 0
 
 
-        # ====================================================
-        # RECORD OBSERVATION
-        # ====================================================
-
-        cursor.execute("""
-            INSERT INTO observations (
-                observation_id,
-                scan_id,
-                band_id,
-                received_signal,
-                actual_signal,
-                snr_db
-            )
-            VALUES (%s, %s, %s, %s, %s, %s);
-        """, (
-            observation_id,
-            scan_id,
-            band_id,
-            received_signal,
-            actual_signal,
-            snr_db
-        ))
-
-
-        # ====================================================
-        # UPDATE ADAPTIVE MEMORY
-        # ====================================================
-
-        if strategy == "Adaptive":
-
-            if actual_signal and received_signal:
-
-                recent_hits[band_id] += 1
-
-                last_detection[
-                    band_id
-                ] = scan_time
-
-            elif actual_signal:
-
-                recent_misses[
-                    band_id
-                ] += 1
-
-
-        # ====================================================
-        # SUCCESSFUL INTERCEPTION
-        # ====================================================
-
-        if (
-            actual_signal
-            and received_signal
-            and active_transmission
-            is not None
-        ):
-
-            # Small receiver processing delay
-            processing_delay = random.uniform(
-                0.02,
-                0.08
-            )
-
-            intercept_time = (
-                scan_time
-                + timedelta(
-                    seconds=processing_delay
-                )
-            )
-
-            # The important metric:
-            #
-            # time from transmission beginning
-            # until successful interception.
-
-            time_error_ms = (
-                intercept_time
-                - active_transmission[
-                    "start_time"
-                ]
-            ).total_seconds() * 1000
-
-
-            cursor.execute("""
-                INSERT INTO intercepts (
-                    intercept_id,
-                    observation_id,
-                    emitter_id,
-                    intercept_time,
-                    time_error_ms
-                )
-                VALUES (%s, %s, %s, %s, %s);
-            """, (
-                intercept_id,
-                observation_id,
-                active_transmission[
-                    "emitter_id"
-                ],
-                intercept_time,
-                round(
-                    time_error_ms,
-                    2
-                )
-            ))
-
-            intercept_id += 1
-
-
-        scan_id += 1
-        observation_id += 1
-
-
-# ============================================================
-# SAVE EVERYTHING
-# ============================================================
-
-connection.commit()
-
-
-# ============================================================
-# SUMMARY
-# ============================================================
-
-print()
-print("============================================")
-print("SIMULATION COMPLETE")
-print("============================================")
-print(
-    f"Transmissions : {len(transmissions)}"
-)
-print(
-    f"Scans         : {scan_id - 1}"
-)
-print(
-    f"Observations  : {observation_id - 1}"
-)
-print(
-    f"Intercepts    : {intercept_id - 1}"
-)
-print("============================================")
-
-
-cursor.close()
-connection.close()
-
-print("Database connection closed.")
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (psycopg2.Error, RuntimeError, ValueError) as exc:
+        print(f"Simulation failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)

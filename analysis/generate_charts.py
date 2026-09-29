@@ -1,15 +1,14 @@
 import os
+from pathlib import Path
 import psycopg2
 import pandas as pd
 import matplotlib.pyplot as plt
-from pathlib import Path
 from sqlalchemy import create_engine
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
-load_dotenv(
-    Path(__file__).resolve().parent.parent / ".env"
-)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -23,7 +22,7 @@ DB_CONFIG = {
 # OUTPUT DIRECTORY
 # ============================================================
 
-OUTPUT_DIR = Path("../output/charts")
+OUTPUT_DIR = PROJECT_ROOT / "output" / "charts"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============================================================
@@ -106,12 +105,7 @@ interception AS (
         s.strategy,
 
         ROUND(
-            AVG(
-                EXTRACT(
-                    EPOCH FROM
-                    (i.intercept_time - t.start_time)
-                )::numeric
-            ),
+            AVG(i.time_error_ms)::numeric / 1000,
             3
         ) AS average_intercept_time
 
@@ -122,12 +116,6 @@ interception AS (
 
     JOIN scans s
         ON o.scan_id = s.scan_id
-
-    JOIN transmissions t
-        ON t.emitter_id = i.emitter_id
-       AND t.band_id = o.band_id
-       AND i.intercept_time >= t.start_time
-       AND i.intercept_time <= t.end_time
 
     GROUP BY s.strategy
 )
@@ -291,7 +279,7 @@ plt.close()
 # ============================================================
 
 df.to_csv(
-    "../output/final_results.csv",
+    PROJECT_ROOT / "output" / "final_results.csv",
     index=False
 )
 

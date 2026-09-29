@@ -1,0 +1,32 @@
+scenario:
+  name: basic
+  duration_seconds: 100
+  scans_per_strategy: 500
+  dwell_time_ms: 200
+  seed: 42
+  start_time: "2026-01-01T10:00:00"
+
+emitters:
+  - id: 1
+    name: Emitter Alpha
+    type: fixed
+    band_id: 3
+    period_seconds: 4
+    duration_seconds: 0.8
+    power_dbm: -18
+  - id: 2
+    name: Emitter Bravo
+    type: periodic
+    band_id: 5
+    period_seconds: 5
+    duration_seconds: 1
+    phase_seconds: 1
+    power_dbm: -20
+
+noise:
+  noise_floor_dbm: -82
+  noise_std_db: 4
+  detection_threshold_db: 10
+  threshold_jitter_db: 2
+  path_loss_min_db: 5
+  path_loss_max_db: 55
